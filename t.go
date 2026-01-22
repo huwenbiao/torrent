@@ -246,6 +246,32 @@ func (t *Torrent) Files() []*File {
 	return *t.files
 }
 
+// SetTrackerInfohash sets a specific infohash to use when announcing to a given tracker URL.
+// This is useful for PT trackers where the same torrent may have different infohashes
+// on different trackers due to modified announce URLs in the torrent file.
+// The trackerUrl should match the URL used in the announce list.
+// If infohash is zero, the mapping is removed and the default torrent infohash will be used.
+func (t *Torrent) SetTrackerInfohash(trackerUrl string, infohash [20]byte) {
+	t.cl.lock()
+	defer t.cl.unlock()
+
+	if t.trackerUrlToInfohash == nil {
+		t.trackerUrlToInfohash = make(map[string][20]byte)
+	}
+
+	var zeroHash [20]byte
+	if infohash == zeroHash {
+		// Remove mapping
+		delete(t.trackerUrlToInfohash, trackerUrl)
+	} else {
+		// Set mapping
+		t.trackerUrlToInfohash[trackerUrl] = infohash
+	}
+
+	// Restart tracker scrapers to apply the new infohash mapping
+	t.startMissingTrackerScrapers()
+}
+
 func (t *Torrent) AddPeers(pp []PeerInfo) (n int) {
 	t.cl.lock()
 	defer t.cl.unlock()

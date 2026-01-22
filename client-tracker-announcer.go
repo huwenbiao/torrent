@@ -623,7 +623,7 @@ func (me *regularTrackerAnnounceDispatcher) singleAnnounce(
 ) {
 	// A logger that includes the nice torrent group so we know what the announce is for.
 	logger = logger.With(t.slogGroup())
-	req := t.announceRequest(event, key.ShortInfohash)
+	req := t.announceRequest(event, key.ShortInfohash, string(key.url))
 	me.torrentClient.unlock()
 	ctx, cancel := context.WithTimeout(context.TODO(), tracker.DefaultTrackerAnnounceTimeout)
 	defer cancel()
@@ -655,7 +655,7 @@ func (me *regularTrackerAnnounceDispatcher) singleAnnounce(
 			}
 		}
 	})
-	t.addPeers(peerInfos(nil).AppendFromTracker(resp.Peers))
+	t.addPeers(peerInfos(nil).AppendFromTracker(resp.Peers, string(key.url)))
 }
 
 // Updates the announce state, shared by regularTrackerAnnounceDispatcher and Torrent, but it lives in Torrent

@@ -10,6 +10,10 @@ type TorrentStats struct {
 	AllConnStats
 	TorrentStatCounters
 	TorrentGauges
+	// Statistics per tier. Each element corresponds to a tier in the announce list.
+	// The key is the tier index (0-based), and the value contains the aggregated stats
+	// for all peers discovered from trackers in that tier.
+	TierStats map[int]AllConnStats
 }
 
 type AllConnStats struct {

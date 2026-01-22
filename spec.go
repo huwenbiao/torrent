@@ -27,6 +27,11 @@ type TorrentSpec struct {
 	Sources []string
 	// BEP 52 "piece layers" from metainfo
 	PieceLayers map[string]string
+	// Map from tracker URL to infohash for PT trackers. If a tracker URL is in this map,
+	// use the mapped infohash instead of the torrent's default infohash when announcing.
+	// This is useful for PT trackers where the same torrent may have different infohashes
+	// on different trackers due to modified announce URLs in the torrent file.
+	TrackerInfohashes map[string][20]byte
 }
 
 func TorrentSpecFromMagnetUri(uri string) (spec *TorrentSpec, err error) {

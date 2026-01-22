@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"runtime"
 	"slices"
 	"strconv"
@@ -338,7 +339,9 @@ func (cl *Client) init(cfg *ClientConfig) {
 			if !ok {
 				return tracker.AnnounceRequest{}, errors.New("torrent not tracked by client")
 			}
-			return t.announceRequest(event, infoHash), nil
+			// Websocket trackers don't have a specific tracker URL in this context,
+			// so we use empty string which will fall back to global stats
+			return t.announceRequest(event, infoHash, ""), nil
 		},
 		Proxy:                      cl.config.HTTPProxy,
 		WebsocketTrackerHttpHeader: cl.config.WebsocketTrackerHttpHeader,
@@ -975,6 +978,7 @@ func (cl *Client) outgoingConnection(
 	}
 	defer c.close()
 	c.Discovery = opts.peerInfo.Source
+	c.trackerUrl = opts.peerInfo.TrackerUrl
 	c.trusted = opts.peerInfo.Trusted
 	opts.t.runHandshookConnLoggingErr(c)
 }
@@ -1595,6 +1599,25 @@ func (t *Torrent) MergeSpec(spec *TorrentSpec) error {
 	// TODO: The lock should be moved earlier.
 	cl.lock()
 	defer cl.unlock()
+
+	// Set tracker infohash mappings if provided (before adding trackers)
+	if len(spec.TrackerInfohashes) > 0 {
+		if t.trackerUrlToInfohash == nil {
+			t.trackerUrlToInfohash = make(map[string][20]byte)
+		}
+		for trackerUrl, infohash := range spec.TrackerInfohashes {
+			t.trackerUrlToInfohash[trackerUrl] = infohash
+			// For UDP trackers, also map udp4 and udp6 variants
+			u, err := url.Parse(trackerUrl)
+			if err == nil && u.Scheme == "udp" {
+				u.Scheme = "udp4"
+				t.trackerUrlToInfohash[u.String()] = infohash
+				u.Scheme = "udp6"
+				t.trackerUrlToInfohash[u.String()] = infohash
+			}
+		}
+	}
+
 	for _, url := range spec.Webseeds {
 		t.addWebSeed(url)
 	}
@@ -1671,10 +1694,25 @@ func (cl *Client) AddMagnet(uri string) (T *Torrent, err error) {
 	return
 }
 
-func (cl *Client) AddTorrent(mi *metainfo.MetaInfo) (T *Torrent, err error) {
+// AddTorrentOptions contains optional parameters for AddTorrent.
+type AddTorrentOptions struct {
+	// Map from tracker URL to infohash for PT trackers. If a tracker URL is in this map,
+	// use the mapped infohash instead of the torrent's default infohash when announcing.
+	// This is useful for PT trackers where the same torrent may have different infohashes
+	// on different trackers due to modified announce URLs in the torrent file.
+	TrackerInfohashes map[string][20]byte
+}
+
+func (cl *Client) AddTorrent(mi *metainfo.MetaInfo, opts ...AddTorrentOptions) (T *Torrent, err error) {
 	ts, err := TorrentSpecFromMetaInfoErr(mi)
 	if err != nil {
 		return
+	}
+	// Apply optional parameters
+	if len(opts) > 0 {
+		if opts[0].TrackerInfohashes != nil {
+			ts.TrackerInfohashes = opts[0].TrackerInfohashes
+		}
 	}
 	T, _, err = cl.AddTorrentSpec(ts)
 	return

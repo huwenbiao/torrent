@@ -120,6 +120,13 @@ type Torrent struct {
 	storageLock sync.RWMutex
 
 	announceList metainfo.AnnounceList
+	// Map from tracker URL to tier index in announceList
+	trackerUrlToTier map[string]int
+	// Statistics per tier. Index corresponds to tier index in announceList.
+	tierStats []AllConnStats
+	// Map from tracker URL to infohash for PT trackers. If a tracker URL is in this map,
+	// use the mapped infohash instead of the torrent's default infohash when announcing.
+	trackerUrlToInfohash map[string][20]byte
 
 	// The info dict. nil if we don't have it (yet).
 	info *metainfo.Info
@@ -967,6 +974,21 @@ func (t *Torrent) writeStatus(w io.Writer) {
 	fmt.Fprintf(w, "DHT Announces: %d\n", t.numDHTAnnounces)
 
 	dumpStats(w, t.statsLocked())
+
+	// Display tier-specific statistics
+	if len(t.tierStats) > 0 {
+		fmt.Fprintf(w, "\nTier Statistics:\n")
+		for tierIndex, tier := range t.announceList {
+			if tierIndex < len(t.tierStats) {
+				tierStat := t.tierStats[tierIndex]
+				fmt.Fprintf(w, "  Tier %d (trackers: %v):\n", tierIndex, tier)
+				fmt.Fprintf(w, "    Uploaded: %d bytes\n", tierStat.BytesWrittenData.Int64())
+				fmt.Fprintf(w, "    Downloaded: %d bytes\n", tierStat.BytesReadUsefulData.Int64())
+				fmt.Fprintf(w, "    Total Uploaded: %d bytes\n", tierStat.BytesWritten.Int64())
+				fmt.Fprintf(w, "    Total Downloaded: %d bytes\n", tierStat.BytesRead.Int64())
+			}
+		}
+	}
 
 	fmt.Fprintf(w, "webseeds:\n")
 
@@ -1930,8 +1952,43 @@ func (t *Torrent) addTrackers(announceList [][]string) {
 	for tierIndex, trackerURLs := range announceList {
 		(*fullAnnounceList)[tierIndex] = appendMissingStrings((*fullAnnounceList)[tierIndex], trackerURLs)
 	}
+
+	// Initialize trackerUrlToTier mapping and tierStats
+	t.initTierTracking()
+
 	t.startMissingTrackerScrapers()
 	t.updateWantPeersEvent()
+}
+
+// Initialize tracker URL to tier mapping and tier statistics
+func (t *Torrent) initTierTracking() {
+	if t.trackerUrlToTier == nil {
+		t.trackerUrlToTier = make(map[string]int)
+	}
+
+	// Update trackerUrlToTier mapping
+	for tierIndex, tier := range t.announceList {
+		for _, urlStr := range tier {
+			// Handle UDP trackers that may be expanded to udp4/udp6
+			u, err := url.Parse(urlStr)
+			if err == nil && u.Scheme == "udp" {
+				// Map both udp4 and udp6 variants
+				u.Scheme = "udp4"
+				t.trackerUrlToTier[u.String()] = tierIndex
+				u.Scheme = "udp6"
+				t.trackerUrlToTier[u.String()] = tierIndex
+			}
+			t.trackerUrlToTier[urlStr] = tierIndex
+		}
+	}
+
+	// Initialize tierStats if needed
+	if len(t.tierStats) < len(t.announceList) {
+		// Extend tierStats to match announceList length
+		for len(t.tierStats) < len(t.announceList) {
+			t.tierStats = append(t.tierStats, AllConnStats{})
+		}
+	}
 }
 
 func (t *Torrent) modifyTrackers(announceList [][]string) {
@@ -2182,6 +2239,28 @@ func (t *Torrent) startScrapingTracker(_url string) {
 		return
 	}
 	announcerKey := trackerAnnouncerKey(_url)
+
+	// Check if this tracker has a specific infohash mapping (for PT trackers)
+	if t.trackerUrlToInfohash != nil {
+		if mappedInfohash, ok := t.trackerUrlToInfohash[_url]; ok {
+			// Use the mapped infohash for this tracker
+			t.startScrapingTrackerWithInfohash(u, announcerKey, mappedInfohash)
+			return
+		}
+		// Also check for udp4/udp6 variants - try original URL with "udp" scheme
+		if u.Scheme == "udp4" || u.Scheme == "udp6" {
+			originalScheme := u.Scheme
+			u.Scheme = "udp"
+			originalUrl := u.String()
+			u.Scheme = originalScheme // Restore original scheme
+			if mappedInfohash, ok := t.trackerUrlToInfohash[originalUrl]; ok {
+				t.startScrapingTrackerWithInfohash(u, announcerKey, mappedInfohash)
+				return
+			}
+		}
+	}
+
+	// Default behavior: use all infohashes for this tracker
 	for ih := range t.iterShortInfohashes() {
 		t.startScrapingTrackerWithInfohash(u, announcerKey, ih)
 	}
@@ -2255,7 +2334,26 @@ func (t *Torrent) startMissingTrackerScrapers() {
 func (t *Torrent) announceRequest(
 	event tracker.AnnounceEvent,
 	shortInfohash [20]byte,
+	trackerUrl string,
 ) tracker.AnnounceRequest {
+	// Get tier index for this tracker URL
+	tierIndex := -1
+	if t.trackerUrlToTier != nil {
+		if idx, ok := t.trackerUrlToTier[trackerUrl]; ok {
+			tierIndex = idx
+		}
+	}
+
+	// Use tier-specific stats if available, otherwise fall back to global stats
+	var uploaded, downloaded int64
+	if tierIndex >= 0 && tierIndex < len(t.tierStats) {
+		uploaded = t.tierStats[tierIndex].BytesWrittenData.Int64()
+		downloaded = t.tierStats[tierIndex].BytesReadUsefulData.Int64()
+	} else {
+		uploaded = t.connStats.BytesWrittenData.Int64()
+		downloaded = t.connStats.BytesReadUsefulData.Int64()
+	}
+
 	// Note that IPAddress is not set. It's set for UDP inside the tracker code, since it's
 	// dependent on the network in use.
 	return tracker.AnnounceRequest{
@@ -2276,10 +2374,9 @@ func (t *Torrent) announceRequest(
 
 		// The following are vaguely described in BEP 3.
 
-		Left:     t.bytesLeftAnnounce(),
-		Uploaded: t.connStats.BytesWrittenData.Int64(),
-		// There's no mention of wasted or unwanted download in the BEP.
-		Downloaded: t.connStats.BytesReadUsefulData.Int64(),
+		Left:       t.bytesLeftAnnounce(),
+		Uploaded:   uploaded,
+		Downloaded: downloaded,
 	}
 }
 
@@ -2463,6 +2560,15 @@ func (t *Torrent) statsLocked() (ret TorrentStats) {
 	ret.AllConnStats = t.connStats.Copy()
 	ret.TorrentStatCounters = copyCountFields(&t.counters)
 	ret.TorrentGauges = t.gauges()
+
+	// Add tier-specific statistics
+	if len(t.tierStats) > 0 {
+		ret.TierStats = make(map[int]AllConnStats)
+		for tierIndex, tierStat := range t.tierStats {
+			ret.TierStats[tierIndex] = tierStat.Copy()
+		}
+	}
+
 	return
 }
 

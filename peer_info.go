@@ -11,6 +11,8 @@ type PeerInfo struct {
 	Id     [20]byte
 	Addr   PeerRemoteAddr
 	Source PeerSource
+	// Tracker URL that this peer was discovered from. Only set when Source is PeerSourceTracker.
+	TrackerUrl string
 	// Peer is known to support encryption.
 	SupportsEncryption bool
 	peer_protocol.PexPeerFlags
@@ -22,6 +24,7 @@ func (me PeerInfo) equal(other PeerInfo) bool {
 	return me.Id == other.Id &&
 		me.Addr.String() == other.Addr.String() &&
 		me.Source == other.Source &&
+		me.TrackerUrl == other.TrackerUrl &&
 		me.SupportsEncryption == other.SupportsEncryption &&
 		me.PexPeerFlags == other.PexPeerFlags &&
 		me.Trusted == other.Trusted

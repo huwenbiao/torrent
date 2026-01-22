@@ -39,6 +39,7 @@ type (
 
 		RemoteAddr              PeerRemoteAddr
 		Discovery               PeerSource
+		trackerUrl              string // Tracker URL that this peer was discovered from. Only set when Discovery is PeerSourceTracker.
 		trusted                 bool
 		closed                  chansync.SetOnce
 		closedCtx               context.Context
@@ -287,6 +288,18 @@ func (cn *Peer) modifyRelevantConnStats(f func(*ConnStats)) {
 		return true
 	}
 	cn.upstreamConnStats()(incAll)
+
+	// Also update tier-specific stats if this peer is from a tracker
+	if cn.t != nil && cn.Discovery == PeerSourceTracker && cn.trackerUrl != "" {
+		if cn.t.trackerUrlToTier != nil {
+			if tierIndex, ok := cn.t.trackerUrlToTier[cn.trackerUrl]; ok {
+				if tierIndex >= 0 && tierIndex < len(cn.t.tierStats) {
+					// Update tier stats
+					f(&cn.t.tierStats[tierIndex].PeerConns)
+				}
+			}
+		}
+	}
 }
 
 // Yields relevant upstream ConnStats. Skips Torrent if it isn't set.
